@@ -25,6 +25,7 @@ import { claimEphemeralNoteSponsored } from "../api/claimEphemeralNoteSponsored"
 import { createRequestSponsored } from "../api/createRequestSponsored";
 import { deployWallet } from "../api/deployWallet";
 import { getAccountHistory } from "../api/getAccountHistory";
+import { getExchangeRates } from "../api/getExchangeRates";
 import { getLinkStatus } from "../api/getLinkStatus";
 import { getMemo } from "../api/getMemo";
 import { ProfileCache } from "../api/profile";
@@ -147,6 +148,23 @@ export function createRouter(
       .query(async (opts) => {
         const { name } = opts.input;
         return nameReg.resolveName(name) || null;
+      }),
+
+    getUniswapRoute: publicProcedure
+      .input(
+        z.object({
+          fromToken: zAddress,
+          fromAmount: zBigIntStr,
+          toAddr: zAddress,
+        })
+      )
+      .query(async (opts) => {
+        const { fromToken, fromAmount, toAddr } = opts.input;
+        return foreignCoinIndexer.getProposedSwap(
+          fromAmount,
+          fromToken,
+          toAddr
+        );
       }),
 
     getEthereumAccount: publicProcedure
@@ -279,6 +297,11 @@ export function createRouter(
           db
         );
       }),
+
+    getExchangeRates: publicProcedure.query(async (opts) => {
+      const rates = await getExchangeRates(vc);
+      return rates;
+    }),
 
     getBestInviteCodeForSender: publicProcedure
       .input(z.object({ apiKey: z.string(), sender: zAddress }))

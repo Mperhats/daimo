@@ -2,6 +2,7 @@ import { generateOnRampURL } from "@coinbase/cbpay-js";
 import {
   AddrLabel,
   ChainGasConstants,
+  CurrencyExchangeRate,
   DaimoInviteCodeStatus,
   DaimoRequestV2Status,
   DisplayOpEvent,
@@ -19,6 +20,7 @@ import {
 import semverLt from "semver/functions/lt";
 import { Address } from "viem";
 
+import { getExchangeRatesCached } from "./getExchangeRates";
 import { getLinkStatus } from "./getLinkStatus";
 import { ProfileCache } from "./profile";
 import { ETHIndexer } from "../contract/ethIndexer";
@@ -60,6 +62,8 @@ export interface AccountHistoryResult {
   invitees: EAccount[];
   notificationRequestStatuses: DaimoRequestV2Status[];
   proposedSwaps: ProposedSwap[];
+
+  exchangeRates: CurrencyExchangeRate[];
 }
 
 export interface SuggestedAction {
@@ -98,6 +102,8 @@ export async function getAccountHistory(
   console.log(`[API] getAccountHist: ${address} since ${sinceBlockNum}`);
   const eAcc = nameReg.getDaimoAccount(address);
   assert(eAcc != null && eAcc.name != null, "Not a Daimo account");
+  const startMs = Date.now();
+  const log = `[API] getAccountHist: ${eAcc.name} ${address} since ${sinceBlockNum}`;
 
   // Get latest finalized block. Next account sync, fetch since this block.
   const finBlock = await vc.publicClient.getBlock({
@@ -105,17 +111,19 @@ export async function getAccountHistory(
   });
   if (finBlock.number == null) throw new Error("No finalized block");
   if (finBlock.number < sinceBlockNum) {
-    console.log(
-      `[API] getAccountHist: OLD final block ${finBlock.number} < ${sinceBlockNum}`
-    );
+    console.log(`${log}: sinceBlockNum > finalized block ${finBlock.number}`);
   }
 
   // Get the latest block + current balance.
   const lastBlk = watcher.latestBlock();
   if (lastBlk == null) throw new Error("No latest block");
+  assert(
+    lastBlk.number >= finBlock.number,
+    `Latest block ${lastBlk.number} < finalized ${finBlock.number}`
+  );
   const lastBlock = Number(lastBlk.number);
   const lastBlockTimestamp = lastBlk.timestamp;
-  const lastBalance = await homeCoinIndexer.getBalanceAt(address, lastBlock);
+  const lastBalance = homeCoinIndexer.getCurrentBalance(address);
 
   // TODO: get userops, including reverted ones. Show failed sends.
 
@@ -124,10 +132,8 @@ export async function getAccountHistory(
     addr: address,
     sinceBlockNum: BigInt(sinceBlockNum),
   });
-
-  console.log(
-    `[API] getAccountHist: ${transferLogs.length} logs for ${address} since ${sinceBlockNum}`
-  );
+  let elapsedMs = Date.now() - startMs;
+  console.log(`${log}: ${elapsedMs}ms ${transferLogs.length} logs`);
 
   // Get named accounts
   const addrs = new Set<Address>();
@@ -169,7 +175,11 @@ export async function getAccountHistory(
     : null;
 
   const inviteeAddrs = inviteGraph.getInvitees(address);
-  const invitees = inviteeAddrs.map((addr) => nameReg.getDaimoAccount(addr)!);
+  const invitees = inviteeAddrs
+    .map((addr) => nameReg.getDaimoAccount(addr))
+    .filter((acc) => acc != null) as EAccount[];
+  elapsedMs = Date.now() - startMs;
+  console.log(`${log}: ${elapsedMs}ms: ${invitees.length} invitees`);
 
   // Get pfps from linked accounts
   const profilePicture = profileCache.getProfilePicture(address);
@@ -178,16 +188,15 @@ export async function getAccountHistory(
   const notificationRequestStatuses = requestIndexer.getAddrRequests(address);
 
   // Get proposed swaps of non-home coin tokens for address
-  const startTime = Date.now();
   const proposedSwaps = [
     ...(await ethIndexer.getProposedSwapsForAddr(address, true)),
     ...(await foreignCoinIndexer.getProposedSwapsForAddr(address, true)),
   ];
-  console.log(
-    `[API] getAccountHistory ${address}: got ${proposedSwaps.length} swaps in ${
-      Date.now() - startTime
-    }ms`
-  );
+  elapsedMs = Date.now() - startMs;
+  console.log(`${log}: ${elapsedMs}: ${proposedSwaps.length} swaps`);
+
+  // Get exchange rates
+  const exchangeRates = await getExchangeRatesCached(vc);
 
   const ret: AccountHistoryResult = {
     address,
@@ -211,6 +220,7 @@ export async function getAccountHistory(
     invitees,
     notificationRequestStatuses,
     proposedSwaps,
+    exchangeRates,
   };
 
   // Suggest an action to the user, like backing up their account

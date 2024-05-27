@@ -6,12 +6,12 @@ import {
   TransferOpEvent,
   guessTimestampFromNum,
 } from "@daimo/common";
-import { erc20ABI } from "@daimo/contract";
 import { DaimoNonce } from "@daimo/userop";
 import { Pool } from "pg";
 import { Address, Hex, bytesToHex, getAddress, numberToHex } from "viem";
 
 import { ForeignCoinIndexer } from "./foreignCoinIndexer";
+import { Indexer } from "./indexer";
 import { NoteIndexer } from "./noteIndexer";
 import { OpIndexer } from "./opIndexer";
 import { RequestIndexer } from "./requestIndexer";
@@ -33,8 +33,9 @@ export interface Transfer {
 }
 
 /* USDC or testUSDC stablecoin contract. Tracks transfers. */
-export class HomeCoinIndexer {
+export class HomeCoinIndexer extends Indexer {
   private allTransfers: Transfer[] = [];
+  private currentBalances: Map<Address, bigint> = new Map();
 
   private listeners: ((transfers: Transfer[]) => void)[] = [];
 
@@ -45,7 +46,9 @@ export class HomeCoinIndexer {
     private requestIndexer: RequestIndexer,
     private foreignCoinIndexer: ForeignCoinIndexer,
     private paymentMemoTracker: PaymentMemoTracker
-  ) {}
+  ) {
+    super("COIN");
+  }
 
   public status() {
     return { numTransfers: this.allTransfers.length };
@@ -82,6 +85,9 @@ export class HomeCoinIndexer {
           [from, to]
         )
     );
+
+    if (this.updateLastProcessedCheckStale(from, to)) return;
+
     const logs: Transfer[] = result.rows.map((row) => {
       return {
         blockHash: bytesToHex(row.block_hash, { size: 32 }),
@@ -103,21 +109,22 @@ export class HomeCoinIndexer {
     );
 
     this.allTransfers = this.allTransfers.concat(logs);
+    logs.forEach((t) => {
+      this.updateCurrentBalance(t.from, -t.value);
+      this.updateCurrentBalance(t.to, t.value);
+    });
+
     this.listeners.forEach((l) => l(logs));
   }
 
-  /** Get balance as of a block height. */
-  async getBalanceAt(addr: Address, blockNum: number) {
-    const blockNumber = BigInt(blockNum);
-    return await retryBackoff(`getBalanceAt-${addr}`, () =>
-      this.client.publicClient.readContract({
-        abi: erc20ABI,
-        address: chainConfig.tokenAddress,
-        functionName: "balanceOf",
-        args: [addr],
-        blockNumber,
-      })
-    );
+  updateCurrentBalance(addr: Address, delta: bigint) {
+    const currentBalance = this.currentBalances.get(addr) || 0n;
+    this.currentBalances.set(addr, currentBalance + delta);
+  }
+
+  /** Get balance as of current shovel sync. */
+  getCurrentBalance(addr: Address) {
+    return this.currentBalances.get(addr) || 0n;
   }
 
   /** Listener invoked for all past coin transfers, then for new ones. */

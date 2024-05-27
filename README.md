@@ -114,8 +114,8 @@ if you need access. Drag-drop the build into the simulator to install.
 Set the following variables to use the remote, hosted API.
 
 ```sh
-export DAIMO_APP_API_URL_TESTNET="https://daimo-api-testnet.onrender.com"
-export DAIMO_APP_API_URL_MAINNET="https://daimo-api-prod.onrender.com"
+export DAIMO_APP_API_URL_TESTNET="https://api-stage.daimo.xyz"
+export DAIMO_APP_API_URL_MAINNET="https://api.daimo.xyz"
 export DAIMO_DOMAIN="daimo.com"
 ```
 
@@ -199,6 +199,19 @@ cd apps/daimo-mobile && npm run dev
 # Third tab
 cd apps/daimo-web && npm run dev
 ```
+
+</details>
+
+<details>
+<summary><strong>Dev quickstart: Maestro</strong></summary>
+
+`daimo-mobile` runs end to end tests with [Maestro](https://maestro.mobile.dev).
+
+To write or run a test locally, first obtain a Expo build labelled with profile `maestro` [here](https://expo.dev/accounts/daimo/projects/daimo/builds).
+
+Then, with Maestro installed, you can simply run `maestro test <test file name>` to run the test. Example: `maestro test .maestro/onboardAndRemove.yaml`.
+
+In the cloud, these tests are run on the master branch using the `maestro-ci` workflow in [Maestro cloud](https://console.mobile.dev).
 
 </details>
 </details>

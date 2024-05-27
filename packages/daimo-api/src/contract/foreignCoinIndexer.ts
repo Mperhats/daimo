@@ -1,4 +1,5 @@
 import {
+  BigIntStr,
   ProposedSwap,
   guessTimestampFromNum,
   isAmountDust,
@@ -7,6 +8,7 @@ import { Pool } from "pg";
 import { Address, Hex, bytesToHex, getAddress } from "viem";
 
 import { Transfer } from "./homeCoinIndexer";
+import { Indexer } from "./indexer";
 import { NameRegistry } from "./nameRegistry";
 import { chainConfig } from "../env";
 import { UniswapClient } from "../network/uniswapClient";
@@ -29,7 +31,7 @@ export type ForeignTokenTransfer = Transfer & {
  * - Foreign Coin Indexer helps map the final inbound Home coin transfer to the
  *   original inbound foreign token transfer.
  */
-export class ForeignCoinIndexer {
+export class ForeignCoinIndexer extends Indexer {
   private foreignTokens: Map<Address, ForeignToken> = new Map();
   private allTransfers: ForeignTokenTransfer[] = [];
 
@@ -40,7 +42,9 @@ export class ForeignCoinIndexer {
 
   private listeners: ((transfers: ForeignTokenTransfer[]) => void)[] = [];
 
-  constructor(private nameReg: NameRegistry, private uc: UniswapClient) {}
+  constructor(private nameReg: NameRegistry, public uc: UniswapClient) {
+    super("SWAPCOIN");
+  }
 
   async load(pg: Pool, from: number, to: number) {
     const startTime = Date.now();
@@ -54,11 +58,16 @@ export class ForeignCoinIndexer {
       async () => {
         await pg.query(`REFRESH MATERIALIZED VIEW filtered_erc20_transfers;`);
         return await pg.query(
-          `select * from filtered_erc20_transfers where block_num BETWEEN $1 AND $2;`,
+          `SELECT * from filtered_erc20_transfers 
+          WHERE block_num BETWEEN $1 AND $2
+          ORDER BY block_num ASC, log_idx ASC;`,
           [from, to]
         );
       }
     );
+
+    if (this.updateLastProcessedCheckStale(from, to)) return;
+
     const logs: ForeignTokenTransfer[] = result.rows
       .map((row) => {
         return {
@@ -111,7 +120,17 @@ export class ForeignCoinIndexer {
       const pendingSwaps = this.pendingSwapsByAddr.get(addr) || [];
 
       // Delete the first matching pending swap that is now swapped
-      const matchingPendingSwap = pendingSwaps.find((t) => t.value === -delta)!;
+      const matchingPendingSwap = pendingSwaps.find(
+        (t) =>
+          t.foreignToken.token === log.foreignToken.token && t.value === -delta
+      );
+
+      if (matchingPendingSwap == null) {
+        console.log(
+          `[SWAPCOIN] SKIPPING outbound token transfer, no matching inbound found. from ${addr}, ${log.value} ${log.foreignToken.symbol} ${log.foreignToken.token}`
+        );
+        return;
+      }
 
       this.correspondingReceiveOfSend.set(
         addrTxHashKey(addr, log.transactionHash),
@@ -125,8 +144,9 @@ export class ForeignCoinIndexer {
       this.pendingSwapsByAddr.set(addr, newPendingSwaps);
     } else {
       // inbound transfer, add as a pending swap
-      if (this.pendingSwapsByAddr.has(addr)) {
-        this.pendingSwapsByAddr.get(addr)!.push(log);
+      const pending = this.pendingSwapsByAddr.get(addr);
+      if (pending != null) {
+        pending.push(log);
       } else {
         this.pendingSwapsByAddr.set(addr, [log]);
       }
@@ -169,7 +189,9 @@ export class ForeignCoinIndexer {
       `[SWAPCOIN] getProposedSwapForLog ${log.from}: ${JSON.stringify(swap)}`
     );
 
-    if (swap && isAmountDust(swap.toAmount, log.foreignToken)) return null;
+    if (!swap) return null;
+    if (!swap.routeFound) return null;
+    if (isAmountDust(swap.toAmount, log.foreignToken)) return null;
     return swap;
   }
 
@@ -208,5 +230,25 @@ export class ForeignCoinIndexer {
       ...correspondingReceive,
       foreignToken: this.foreignTokens.get(log.foreignToken.token)!,
     };
+  }
+
+  // For debugging / introspection of Uniswap routes
+  public async getProposedSwap(
+    fromAmount: BigIntStr,
+    fromToken: Address,
+    toAddr: Address
+  ) {
+    const coin = this.foreignTokens.get(fromToken);
+    if (coin == null) return null;
+    return this.uc.getProposedSwap(
+      toAddr,
+      fromAmount,
+      coin,
+      0,
+      {
+        addr: getAddress("0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"),
+      },
+      true
+    );
   }
 }

@@ -4,7 +4,7 @@ import {
   DaimoNoteStatus,
   DaimoRequestState,
   DaimoRequestV2Status,
-  PreSwapTransfer,
+  DisplayOpEvent,
   amountToDollars,
   assert,
   assertNotNull,
@@ -171,18 +171,14 @@ export class PushNotifier {
           from,
           to,
           -opEvent.amount,
-          opEvent.type === "transfer" ? opEvent.memo : undefined,
-          false,
-          opEvent.type === "transfer" ? opEvent.preSwapTransfer : undefined
+          opEvent
         ),
         this.getPushMessagesFromTransfer(
           log.transactionHash,
           to,
           from,
           opEvent.amount,
-          opEvent.type === "transfer" ? opEvent.memo : undefined,
-          opEvent.type === "transfer" && opEvent.requestStatus != null,
-          opEvent.type === "transfer" ? opEvent.preSwapTransfer : undefined
+          opEvent
         ),
       ]);
       messages.push(...a, ...b);
@@ -229,10 +225,10 @@ export class PushNotifier {
     addr: Address,
     other: Address,
     amount: number,
-    memo: string | undefined,
-    receivingRequestedMoney: boolean,
-    preSwapTransfer: PreSwapTransfer | undefined
+    opEvent: DisplayOpEvent
   ): Promise<ExpoPushMessage[]> {
+    if (opEvent.type !== "transfer") return []; // Only transfer opEvents handled here
+
     const pushTokens = this.pushTokens.get(addr);
     if (!pushTokens || pushTokens.length === 0) return [];
 
@@ -241,17 +237,16 @@ export class PushNotifier {
 
     // Get the other side
     const otherAcc = await this.nameReg.getEAccount(other);
-    if (otherAcc.label === AddrLabel.PaymentLink) {
-      // Handled separately, see maybeNotifyPaymentLink
-      return [];
-    } else if (otherAcc.label === AddrLabel.Paymaster) {
+
+    if (otherAcc.label === AddrLabel.Paymaster) {
       // ignore paymaster transfers
       return [];
     }
+
     const otherStr = getAccountName(otherAcc);
 
     const title = (() => {
-      if (preSwapTransfer) {
+      if (opEvent.preSwapTransfer) {
         assert(amount > 0); // foreignCoin can only be involved in receiving ends of swaps
         return `Accepted $${dollars} from ${otherStr}`;
       } else if (amount < 0) return `Sent $${dollars} to ${otherStr}`;
@@ -259,20 +254,35 @@ export class PushNotifier {
     })();
 
     const body = (() => {
-      if (memo) return memo;
-      if (receivingRequestedMoney)
-        return `Your ${dollars} ${tokenSymbol} request was fulfilled`;
-      if (preSwapTransfer) {
+      // Transfer with memo
+      if (opEvent.memo) return opEvent.memo;
+
+      // Transfer fulilling request
+      if (opEvent.requestStatus) {
+        assert(opEvent.requestStatus.status === DaimoRequestState.Fulfilled);
+        if (amount > 0) {
+          return `Your ${dollars} ${tokenSymbol} request was fulfilled`;
+        } else {
+          return `You fulfilled ${dollars} ${tokenSymbol} request`;
+        }
+      }
+
+      // Swap
+      if (opEvent.preSwapTransfer) {
         assert(amount > 0); // foreignCoin can only be involved in receiving ends of swaps
         const readableAmount = getForeignCoinDisplayAmount(
-          preSwapTransfer.amount,
-          preSwapTransfer.coin
+          opEvent.preSwapTransfer.amount,
+          opEvent.preSwapTransfer.coin
         );
-        return `You accepted ${readableAmount} ${preSwapTransfer.coin.symbol} as $${dollars} ${tokenSymbol}`;
+        return `You accepted ${readableAmount} ${opEvent.preSwapTransfer.coin.symbol} as $${dollars} ${tokenSymbol}`;
       }
-      if (amount < 0)
+
+      // Vanilla transfer
+      if (amount < 0) {
         return `You sent ${dollars} ${tokenSymbol} to ${otherStr}`;
-      return `You received ${dollars} ${tokenSymbol} from ${otherStr}`;
+      } else {
+        return `You received ${dollars} ${tokenSymbol} from ${otherStr}`;
+      }
     })();
 
     return [
@@ -356,32 +366,13 @@ export class PushNotifier {
 
     for (const log of logs) {
       // Only proceed if log is relevant.
-      const done = [DaimoRequestState.Pending, DaimoRequestState.Cancelled];
-      if (done.includes(log.status)) continue;
+      if (log.status !== DaimoRequestState.Created) continue;
 
       const { tokenSymbol } = chainConfig;
       const {
         link: { dollars },
         metadata,
       } = log;
-
-      // On fulfillment, ensure both parties have Daimo accounts
-      if (
-        log.recipient.name &&
-        log.status === DaimoRequestState.Fulfilled &&
-        log.fulfilledBy?.name
-      ) {
-        const pushTokens = this.pushTokens.get(log.recipient.addr);
-
-        if (pushTokens) {
-          messages.push({
-            to: pushTokens,
-            badge: 1,
-            title: "Request fulfilled",
-            body: `${log.fulfilledBy.name} sent you $${dollars} ${tokenSymbol}`,
-          });
-        }
-      }
 
       // On creation, parse fulfiller name from metadata.
       if (log.recipient.name && log.status === DaimoRequestState.Created) {
